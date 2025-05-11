@@ -7,6 +7,9 @@ yarn-error.log
 # Environment variables
 .env
 
+# Documentation
+README.md
+
 # macOS
 .DS_Store
 

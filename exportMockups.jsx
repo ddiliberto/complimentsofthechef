@@ -1,57 +1,96 @@
+// Create a log file
+var logFile = new File("~/Desktop/illustrator-automation/mockup_generation.log");
+logFile.open("w");
+
+// Function to write to both console and log file
+function log(message) {
+    $.writeln(message);
+    logFile.writeln(message);
+}
+
+// Add a timestamp to the log for tracking
+var startTime = new Date();
+log("🚀 MOCKUP_GENERATION_START: " + startTime.toLocaleString());
+
 var exportFolder = Folder("~/Desktop/illustrator-automation/export-mockups/");
 var designFolder = Folder("~/Desktop/illustrator-automation/export/");
 var inputFiles = designFolder.getFiles("*.png");
 
-if (inputFiles.length === 0) {
-    $.writeln("❌ No PNG files found in /export/");
+// Count variables for summary
+var totalDesigns = inputFiles.length;
+var totalMockups = 0;
+var successfulMockups = 0;
+
+if (totalDesigns === 0) {
+    log("❌ MOCKUP_ERROR: No PNG files found in /export/");
 } else {
+    log("📊 MOCKUP_INFO: Found " + totalDesigns + " designs to process");
+    
     var doc = app.activeDocument;
+    var backgroundGroup = doc.layerSets.getByName("BACKGROUND");
+    var totalColors = backgroundGroup.artLayers.length;
+    
+    log("📊 MOCKUP_INFO: Found " + totalColors + " color variations");
+    log("📊 MOCKUP_INFO: Will generate " + (totalDesigns * totalColors) + " total mockups");
 
     for (var f = 0; f < inputFiles.length; f++) {
         var designFile = inputFiles[f];
         var designName = designFile.name.replace(".png", "");
         var designPath = File(designFile);
-        $.writeln("▶ Exporting " + designName + " (" + (f + 1) + " of " + inputFiles.length + ")");
+        log("▶ MOCKUP_PROCESSING: " + designName + " (" + (f + 1) + " of " + totalDesigns + ")");
 
-        var designLayer = doc.artLayers.getByName("design-placement");
-        app.activeDocument.activeLayer = designLayer;
+        try {
+            var designLayer = doc.artLayers.getByName("design-placement");
+            app.activeDocument.activeLayer = designLayer;
 
-        replaceSmartObjectContents(designLayer, designPath);
-        resizeAndCenterSmartObject();
+            replaceSmartObjectContents(designLayer, designPath);
+            resizeAndCenterSmartObject();
 
-        var productFolder = new Folder(exportFolder + "/" + designName);
-        if (!productFolder.exists) productFolder.create();
+            var productFolder = new Folder(exportFolder + "/" + designName);
+            if (!productFolder.exists) productFolder.create();
 
-        var backgroundGroup = doc.layerSets.getByName("BACKGROUND");
+            for (var i = 0; i < backgroundGroup.artLayers.length; i++) {
+                var colorLayer = backgroundGroup.artLayers[i];
+                totalMockups++;
 
-        for (var i = 0; i < backgroundGroup.artLayers.length; i++) {
-            var colorLayer = backgroundGroup.artLayers[i];
+                for (var j = 0; j < backgroundGroup.artLayers.length; j++) {
+                    backgroundGroup.artLayers[j].visible = false;
+                }
 
-            for (var j = 0; j < backgroundGroup.artLayers.length; j++) {
-                backgroundGroup.artLayers[j].visible = false;
+                colorLayer.visible = true;
+
+                var colorName = colorLayer.name.replace("Color - ", "").replace(/\\s+/g, "-").toUpperCase();
+                var exportFile = new File(productFolder + "/" + designName + "-" + colorName + ".png");
+
+                var opts = new ExportOptionsSaveForWeb();
+                opts.format = SaveDocumentType.PNG;
+                opts.PNG8 = false;
+                opts.transparency = true;
+                opts.interlaced = false;
+                opts.quality = 100;
+
+                doc.exportDocument(exportFile, ExportType.SAVEFORWEB, opts);
+                successfulMockups++;
+                log("✓ MOCKUP_EXPORTED: " + designName + "-" + colorName);
             }
 
-            colorLayer.visible = true;
-
-            var colorName = colorLayer.name.replace("Color - ", "").replace(/\\s+/g, "-").toUpperCase();
-            var exportFile = new File(productFolder + "/" + designName + "-" + colorName + ".png");
-
-            var opts = new ExportOptionsSaveForWeb();
-            opts.format = SaveDocumentType.PNG;
-            opts.PNG8 = false;
-            opts.transparency = true;
-            opts.interlaced = false;
-            opts.quality = 100;
-
-            doc.exportDocument(exportFile, ExportType.SAVEFORWEB, opts);
-            $.writeln("→ " + designName + "-" + colorName + " exported");
+            log("✅ MOCKUP_COMPLETED: " + designName);
+        } catch (e) {
+            log("❌ MOCKUP_ERROR: Failed to process " + designName + " - " + e.message);
         }
-
-        $.writeln("✅ Done with " + designName);
     }
 
-    $.writeln("🎉 All mockups exported!");
+    var endTime = new Date();
+    var duration = (endTime - startTime) / 1000; // in seconds
+    
+    log("📊 MOCKUP_SUMMARY: Generated " + successfulMockups + " of " + totalMockups + " mockups");
+    log("📊 MOCKUP_SUMMARY: Processed " + totalDesigns + " designs");
+    log("📊 MOCKUP_SUMMARY: Time taken: " + duration.toFixed(2) + " seconds");
+    log("🎉 MOCKUP_GENERATION_COMPLETE");
 }
+
+// Close the log file
+logFile.close();
 
 // === Replaces the Smart Object contents with the PNG ===
 function replaceSmartObjectContents(layer, file) {
