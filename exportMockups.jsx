@@ -59,7 +59,7 @@ if (totalDesigns === 0) {
 
                 colorLayer.visible = true;
 
-                var colorName = colorLayer.name.replace("Color - ", "").replace(/\\s+/g, "-").toUpperCase();
+                var colorName = colorLayer.name.replace("Color - ", "").replace(/\s+/g, "-").toUpperCase();
                 var exportFile = new File(productFolder + "/" + designName + "-" + colorName + ".png");
 
                 var opts = new ExportOptionsSaveForWeb();

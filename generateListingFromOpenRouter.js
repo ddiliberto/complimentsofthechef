@@ -66,7 +66,56 @@ Output JSON like:
   const message = response.data.choices[0].message.content;
 
   try {
-    return JSON.parse(message);
+    // Clean the message to handle potential control characters
+    const cleanedMessage = message
+      .replace(/[\n\r]/g, ' ') // Replace newlines with spaces
+      .replace(/\s+/g, ' ')    // Replace multiple spaces with a single space
+      .replace(/\\n/g, '\\\\n') // Escape newlines in JSON strings
+      .replace(/\\r/g, '\\\\r') // Escape carriage returns in JSON strings
+      .replace(/\\t/g, '\\\\t'); // Escape tabs in JSON strings
+    
+    // Try to extract JSON from the message using regex
+    const jsonMatch = cleanedMessage.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch (innerError) {
+        console.error("❌ Failed to parse extracted JSON. Trying alternative method.");
+      }
+    }
+    
+    // If regex extraction fails, try to parse the original message
+    try {
+      return JSON.parse(message);
+    } catch (originalError) {
+      // If all parsing attempts fail, create a structured object manually
+      console.error("❌ Failed to parse JSON. Creating structured object manually.");
+      
+      // Extract title, emojis, description, and tags using regex
+      const titleMatch = message.match(/\"title\":\s*\"([^\"]+)\"/);
+      const emojisMatch = message.match(/\"emojis\":\s*\"([^\"]+)\"/);
+      const descriptionMatch = message.match(/\"description\":\s*\"([^\"]+)\"/);
+      const tagsMatch = message.match(/\"tags\":\s*\[(.*?)\]/);
+      
+      const title = titleMatch ? titleMatch[1] : "";
+      const emojis = emojisMatch ? emojisMatch[1] : "";
+      const description = descriptionMatch ? descriptionMatch[1] : "";
+      const tagsString = tagsMatch ? tagsMatch[1] : "";
+      
+      // Parse tags
+      const tags = tagsString
+        .split(',')
+        .map(tag => tag.trim().replace(/^"|"$/g, ''))
+        .filter(tag => tag);
+      
+      return {
+        word: message.includes(word) ? word : "",
+        title,
+        emojis,
+        description,
+        tags
+      };
+    }
   } catch (e) {
     console.error("❌ Failed to parse JSON. Raw response:", message);
     throw e;

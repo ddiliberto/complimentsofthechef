@@ -4,10 +4,61 @@ const csv = require('csv-parser');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
+const { main: uploadToPrintful } = require('./uploadToPrintful');
 
 // Command line arguments
 const args = process.argv.slice(2);
 const SKIP_MOCKUPS = args.includes('--skip-mockups');
+const SKIP_UPLOAD = args.includes('--skip-upload');
+const DRY_RUN = args.includes('--dry-run') || args.includes('-d');
+const SHOW_HELP = args.includes('-help') || args.includes('--help') || args.includes('-h');
+
+// Check for limit argument (--limit=N or -l=N)
+let LIMIT = undefined;
+const limitArg = args.find(arg => arg.startsWith('--limit=') || arg.startsWith('-l='));
+if (limitArg) {
+  const limitValue = limitArg.split('=')[1];
+  LIMIT = parseInt(limitValue, 10);
+  if (isNaN(LIMIT) || LIMIT <= 0) {
+    LIMIT = undefined;
+    console.warn('⚠️ Invalid limit value. Processing all files.');
+  }
+}
+
+/**
+ * Display help menu
+ */
+function showHelp() {
+  console.log(`
+📋 Illustrator Automation Pipeline Help
+======================================
+
+This script automates the process of generating designs, creating mockups, and uploading to Printful.
+
+Usage: node generate.js [options]
+
+Options:
+  --skip-mockups       Skip the mockup generation step
+  --skip-upload        Skip the upload to Printful step
+  --dry-run, -d        Run in dry-run mode (no actual API calls to Printful or Dropbox)
+  --limit=N, -l=N      Limit the number of files to process
+  -help, --help, -h    Show this help menu
+
+Examples:
+  node generate.js                     # Run the full pipeline
+  node generate.js --skip-mockups      # Skip mockup generation
+  node generate.js --skip-upload       # Skip Printful upload
+  node generate.js --dry-run           # Run in dry-run mode
+  node generate.js --limit=5           # Process only 5 files
+  node generate.js -help               # Show this help menu
+`);
+  process.exit(0);
+}
+
+// Show help if requested
+if (SHOW_HELP) {
+  showHelp();
+}
 
 function hexToRgb(hex) {
   const cleaned = hex.replace('#', '');
@@ -255,25 +306,83 @@ end tell
  * Execute the full pipeline
  */
 async function runPipeline() {
+  console.log('🚀 Starting Illustrator automation pipeline...');
+  
+  let illustratorSuccess = false;
+  let mockupSuccess = false;
+  let uploadSuccess = false;
+  
+  // Step 1: Generate PNGs with Illustrator
   try {
-    console.log('🚀 Starting Illustrator automation pipeline...');
-    
-    // Step 1: Generate PNGs with Illustrator
     console.log('\n📝 Generating PNGs with Illustrator...');
     await main();
-    
-    // Step 2: Generate mockups with Photoshop (unless skipped)
-    if (SKIP_MOCKUPS) {
-      console.log('\n⏭️ Skipping mockup generation (--skip-mockups flag used)');
-    } else {
-      console.log('\n📝 Generating mockups with Photoshop...');
-      await runPhotoshopMockups();
-    }
-    
-    console.log('\n✨ Pipeline completed successfully!');
+    illustratorSuccess = true;
+    console.log('✅ Illustrator generation completed successfully');
   } catch (error) {
-    console.error(`❌ Pipeline error: ${error.message}`);
-    process.exit(1);
+    console.error(`❌ Illustrator generation error: ${error.message}`);
+    console.log('⚠️ Continuing with pipeline despite Illustrator errors');
+  }
+  
+  // Step 2: Generate mockups with Photoshop (unless skipped)
+  if (SKIP_MOCKUPS) {
+    console.log('\n⏭️ Skipping mockup generation (--skip-mockups flag used)');
+    mockupSuccess = true; // Mark as success since we're skipping
+  } else {
+    try {
+      console.log('\n📝 Generating mockups with Photoshop...');
+      const result = await runPhotoshopMockups();
+      mockupSuccess = result;
+      if (result) {
+        console.log('✅ Mockup generation completed successfully');
+      } else {
+        console.log('⚠️ Mockup generation completed with warnings');
+      }
+    } catch (error) {
+      console.error(`❌ Mockup generation error: ${error.message}`);
+      console.log('⚠️ Continuing with pipeline despite mockup errors');
+    }
+  }
+  
+  // Step 3: Upload to Printful (unless skipped)
+  if (SKIP_UPLOAD) {
+    console.log('\n⏭️ Skipping upload to Printful (--skip-upload flag used)');
+    uploadSuccess = true; // Mark as success since we're skipping
+  } else {
+    try {
+      console.log('\n📝 Uploading to Printful...');
+      
+      // Prepare arguments to pass to uploadToPrintful
+      const uploadOptions = {};
+      
+      if (DRY_RUN) {
+        uploadOptions.dryRun = true;
+        console.log('🔍 Running in dry-run mode');
+      }
+      
+      if (LIMIT !== undefined) {
+        uploadOptions.limit = LIMIT;
+        console.log(`🔍 Limiting to ${LIMIT} files`);
+      }
+      
+      await uploadToPrintful(uploadOptions);
+      uploadSuccess = true;
+      console.log('✅ Printful upload completed successfully');
+    } catch (error) {
+      console.error(`❌ Printful upload error: ${error.message}`);
+      console.log('⚠️ Pipeline will continue but upload step failed');
+    }
+  }
+  
+  // Final summary
+  console.log('\n📊 Pipeline Summary:');
+  console.log(`Illustrator Generation: ${illustratorSuccess ? '✅ Success' : '❌ Failed'}`);
+  console.log(`Mockup Generation: ${SKIP_MOCKUPS ? '⏭️ Skipped' : (mockupSuccess ? '✅ Success' : '❌ Failed')}`);
+  console.log(`Printful Upload: ${SKIP_UPLOAD ? '⏭️ Skipped' : (uploadSuccess ? '✅ Success' : '❌ Failed')}`);
+  
+  if (illustratorSuccess && (SKIP_MOCKUPS || mockupSuccess) && (SKIP_UPLOAD || uploadSuccess)) {
+    console.log('\n✨ Pipeline completed successfully!');
+  } else {
+    console.log('\n⚠️ Pipeline completed with some steps failing or being skipped.');
   }
 }
 

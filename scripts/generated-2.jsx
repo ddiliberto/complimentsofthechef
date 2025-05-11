@@ -1,20 +1,20 @@
 var doc = app.open(new File("~/Desktop/illustrator-automation/template.ai"));
 var textLayer = doc.textFrames.getByName("wordText");
 
-textLayer.contents = "YOGURT";
+textLayer.contents = "TOMATO";
 
 // Fill
 var fillColor = new RGBColor();
-fillColor.red = 255;
-fillColor.green = 224;
-fillColor.blue = 102;
+fillColor.red = 244;
+fillColor.green = 162;
+fillColor.blue = 97;
 textLayer.textRange.characterAttributes.fillColor = fillColor;
 
 // Stroke
 var strokeColor = new RGBColor();
-strokeColor.red = 255;
-strokeColor.green = 224;
-strokeColor.blue = 102;
+strokeColor.red = 244;
+strokeColor.green = 162;
+strokeColor.blue = 97;
 textLayer.textRange.characterAttributes.strokeColor = strokeColor;
 textLayer.textRange.characterAttributes.strokeWeight = 2;
 
@@ -28,7 +28,7 @@ doc.artboards[0].artboardRect = [
 ];
 
 // Export
-var exportFile = new File("~/Desktop/illustrator-automation/export/YOGURT.png");
+var exportFile = new File("~/Desktop/illustrator-automation/export/TOMATO.png");
 var options = new ExportOptionsPNG24();
 options.horizontalScale = (2000 / (bounds[2] - bounds[0])) * 100;
 options.verticalScale = (2000 / (bounds[2] - bounds[0])) * 100;

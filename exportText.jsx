@@ -22,10 +22,10 @@ textLayer.textRange.characterAttributes.strokeWeight = 2;
 // Resize artboard to fit text with padding
 var bounds = textLayer.visibleBounds;
 doc.artboards[0].artboardRect = [
-  bounds[0] - 50,
-  bounds[1] + 50,
-  bounds[2] + 50,
-  bounds[3] - 50
+  bounds[0] - 20,
+  bounds[1] + 20,
+  bounds[2] + 20,
+  bounds[3] - 20
 ];
 
 // Calculate scale to export width = 2000px
