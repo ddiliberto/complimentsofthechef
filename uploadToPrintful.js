@@ -3,8 +3,8 @@
  * 
  * This script completes the end-to-end pipeline by:
  * 1. Processing all PNG files in the export/ directory
- * 2. Using generateListingFromOpenRouter.js to create content for each one
- * 3. Using the Printful Mockup Generator API to generate mockups
+ * 2. Using generateListingFromOpenRouter.js to create content for each one with best-seller format
+ * 3. Uploading PNG files to Printful with proper positioning
  * 4. Creating draft listings on Etsy through Printful's API
  */
 
@@ -37,21 +37,8 @@ if (limitArg) {
   }
 }
 
-// Variant IDs for different sizes and colors
-// These will need to be updated with actual variant IDs from Printful API
-const VARIANT_IDS = {
-  // Example format: 'color-size': variantId
-  'white-S': 4781,
-  'white-M': 4782,
-  'white-L': 4783,
-  'white-XL': 4784,
-  'white-2XL': 4785,
-  'black-S': 4786,
-  'black-M': 4787,
-  'black-L': 4788,
-  'black-XL': 4789,
-  'black-2XL': 4790,
-};
+// We'll fetch these dynamically from the Printful API
+let VARIANT_IDS = {};
 
 // Create Axios instance for Printful API
 const printfulApi = axios.create({
@@ -167,10 +154,11 @@ async function createMockupGenerationTask(productId, fileUrl, variantIds) {
           position: {
             area_width: printfile.width,
             area_height: printfile.height,
-            width: printfile.width,
-            height: printfile.width, // Make it square
-            top: (printfile.height - printfile.width) / 2, // Center vertically
-            left: 0
+            width: printfile.width,       // Full width of the printable area
+            height: printfile.width / 2,  // Proportional height (half of width for a wider look)
+            top: 0,                       // Position at the top
+            left: 0,                      // Align to left edge
+            limit_to_print_area: true
           }
         }
       ],
@@ -261,10 +249,10 @@ async function createProductWithEtsySync(word, listingContent, mockupResult) {
       };
     });
     
-    // Create product
+    // Create product with best-seller format
     const response = await printfulApi.post('/store/products', {
       sync_product: {
-        name: listingContent.title,
+        name: `${word} Sweatshirt - Cute Oversized Unisex Crewneck`,
         thumbnail: mockupUrls[0], // Use first mockup as thumbnail
         is_ignored: false
       },
@@ -305,9 +293,17 @@ async function processFile(filePath) {
   console.log(`\n🔄 Processing: ${word}`);
   
   try {
-    // Step 1: Generate listing content
+    // Step 1: Generate listing content with best-seller format
     console.log(`⏳ Generating listing content for ${word}...`);
     const listingContent = await generateListing(word);
+    
+    // Ensure the content follows the best-seller format
+    if (!listingContent.description.includes('DETAILS') ||
+        !listingContent.description.includes('FAST PROCESSING') ||
+        !listingContent.description.includes('SATISFACTION GUARANTEE')) {
+      console.log(`⚠️ Warning: Generated content may not follow the best-seller format. Check the output.`);
+    }
+    
     console.log(`✅ Listing content generated`);
     
     if (DRY_RUN) {
@@ -350,6 +346,75 @@ async function processFile(filePath) {
 /**
  * Main function
  */
+/**
+ * Get variant IDs for Gildan 18000 sweatshirt
+ * @returns {Promise<Object>} Variant IDs
+ */
+async function getVariantIds() {
+  try {
+    console.log(`⏳ Getting variant IDs for Gildan 18000 sweatshirt...`);
+    
+    // Get product information
+    const response = await printfulApi.get(`/products/${GILDAN_18000_PRODUCT_ID}`);
+    const variants = response.data.result.variants;
+    
+    // Create a map of color-size to variant ID
+    const variantIds = {};
+    for (const variant of variants) {
+      const color = variant.color.toLowerCase();
+      const size = variant.size;
+      const key = `${color}-${size}`;
+      variantIds[key] = variant.id;
+      console.log(`  - Found variant: ${color} ${size} (ID: ${variant.id})`);
+    }
+    
+    console.log(`✅ Found ${Object.keys(variantIds).length} variants`);
+    return variantIds;
+  } catch (error) {
+    console.error(`❌ Error getting variant IDs:`, error.message);
+    console.log(`⚠️ Using default variant IDs`);
+    
+    // Return default variant IDs as fallback
+    return {
+      'white-S': 4781,
+      'white-M': 4782,
+      'white-L': 4783,
+      'white-XL': 4784,
+      'white-2XL': 4785,
+      'black-S': 4786,
+      'black-M': 4787,
+      'black-L': 4788,
+      'black-XL': 4789,
+      'black-2XL': 4790,
+    };
+  }
+}
+
+/**
+ * Get store information from Printful API
+ * @returns {Promise<Object>} Store information
+ */
+async function getStoreInfo() {
+  try {
+    const response = await axios.get('https://api.printful.com/stores', {
+      headers: {
+        'Authorization': `Bearer ${PRINTFUL_API_KEY}`
+      }
+    });
+    
+    if (response.data && response.data.result && response.data.result.length > 0) {
+      const store = response.data.result[0]; // Use the first store
+      console.log(`✅ Found store: ${store.name} (ID: ${store.id})`);
+      return store;
+    } else {
+      throw new Error('No stores found in Printful account');
+    }
+  } catch (error) {
+    console.error(`❌ Error getting store information:`, error.message);
+    throw error;
+  }
+}
+
 async function main() {
   try {
     console.log('🚀 Starting uploadToPrintful.js');
@@ -357,13 +422,24 @@ async function main() {
     if (DRY_RUN) {
       console.log('🔍 DRY RUN MODE: No actual API calls will be made to Printful');
     } else {
-      // Check if API key and store ID are set
+      // Check if API key is set
       if (!PRINTFUL_API_KEY) {
         throw new Error('PRINTFUL_API_KEY is not set in .env file');
       }
       
-      if (!PRINTFUL_STORE_ID) {
-        throw new Error('PRINTFUL_STORE_ID is not set in .env file');
+      // Check if store ID is set, if not, try to get it from the API
+      if (!PRINTFUL_STORE_ID || PRINTFUL_STORE_ID === 'your-store-id-here') {
+        console.log('⚠️ PRINTFUL_STORE_ID is not set in .env file, attempting to get it from the API...');
+        try {
+          const storeInfo = await getStoreInfo();
+          process.env.PRINTFUL_STORE_ID = storeInfo.id.toString();
+          console.log(`✅ Using store ID: ${storeInfo.id}`);
+        } catch (error) {
+          console.error('❌ Failed to get store ID from the API. Please set PRINTFUL_STORE_ID in .env file.');
+          if (!DRY_RUN) {
+            throw new Error('PRINTFUL_STORE_ID is required for non-dry-run mode');
+          }
+        }
       }
     }
     
@@ -375,6 +451,11 @@ async function main() {
     if (LIMIT < files.length) {
       files = files.slice(0, LIMIT);
       console.log(`🔍 Processing only the first ${LIMIT} files due to --limit option`);
+    }
+    
+    // Get variant IDs if not in dry run mode
+    if (!DRY_RUN) {
+      VARIANT_IDS = await getVariantIds();
     }
     
     // Process each file
