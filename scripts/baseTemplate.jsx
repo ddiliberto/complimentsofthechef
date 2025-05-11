@@ -21,10 +21,10 @@ textLayer.textRange.characterAttributes.strokeWeight = 2;
 // Resize artboard
 var bounds = textLayer.visibleBounds;
 doc.artboards[0].artboardRect = [
-  bounds[0] - 50,
-  bounds[1] + 50,
-  bounds[2] + 50,
-  bounds[3] - 50
+  bounds[0] - 5,
+  bounds[1] + 5,
+  bounds[2] + 5,
+  bounds[3] - 5
 ];
 
 // Export
