@@ -27,13 +27,18 @@ const PRINTFUL_STORE_ID = process.env.PRINTFUL_STORE_ID;
 const EXPORT_DIR = path.join(__dirname, 'export');
 const EXPORT_MOCKUPS_DIR = path.join(__dirname, 'export-mockups');
 const MANUAL_TEMPLATES_DIR = path.join(__dirname, 'manual-templates');
-const GILDAN_18000_PRODUCT_ID = 146; // Gildan 18000 Heavy Blend Crewneck Sweatshirt
+const GILDAN_18000_PRODUCT_ID = 145; // Gildan 18000 Heavy Blend Crewneck Sweatshirt
 
 // Command line arguments
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run') || args.includes('-d');
-const TEMPLATE_ONLY = !args.includes('--attempt-sync'); // Default to template-only mode
+const TEMPLATE_ONLY = args.includes('--template-only'); // Default to syncing unless explicitly overridden
 const SYNC_ONLY = args.includes('--sync-only') || args.includes('-s');
+
+// Backward compatibility note for --attempt-sync flag
+if (args.includes('--attempt-sync')) {
+  console.log('⚠️ Note: --attempt-sync is now the default behavior and no longer needed');
+}
 
 // Add help text
 if (args.includes('--help') || args.includes('-h')) {
@@ -45,15 +50,15 @@ This script creates product templates in Printful from PNG files in the export/ 
 Options:
   --dry-run, -d         Run in dry-run mode (no actual API calls)
   --limit=N, -l=N       Process only N files
-  --attempt-sync        Try to sync products (may fail with platform-based stores)
+  --template-only       Skip product syncing (create templates only)
   --sync-only, -s       Skip template creation and only sync products
   --help, -h            Show this help text
 
 Examples:
-  node uploadToPrintful.js                   # Create templates for all files
+  node uploadToPrintful.js                   # Create templates and sync products
   node uploadToPrintful.js --limit=1         # Process only one file
   node uploadToPrintful.js --dry-run         # Test without making API calls
-  node uploadToPrintful.js --attempt-sync    # Try to create templates and sync products
+  node uploadToPrintful.js --template-only   # Create templates only (no syncing)
   `);
   process.exit(0);
 }
@@ -616,7 +621,7 @@ async function processFile(filePath, isDryRun = DRY_RUN) {
         
         // If template-only mode, stop here
         if (TEMPLATE_ONLY) {
-          console.log(`✅ Template-only mode: Skipping product sync for ${word}`);
+          console.log(`⚠️ Template-only mode: Skipping product sync for ${word}`);
           return { templateInfo, word };
         }
       } catch (templateError) {
@@ -677,35 +682,33 @@ async function getVariantIds() {
     const response = await printfulApi.get(`/products/${GILDAN_18000_PRODUCT_ID}`);
     const variants = response.data.result.variants;
     
+    // Define allowed colors to stay under the 100-variant limit
+    const allowedColors = [
+      'black', 'navy', 'maroon', 'forest green', 'dark heather',
+      'military green', 'light blue', 'sport grey', 'light pink', 'white'
+    ];
+
     // Create a map of color-size to variant ID
     const variantIds = {};
     for (const variant of variants) {
       const color = variant.color.toLowerCase();
       const size = variant.size;
-      const key = `${color}-${size}`;
-      variantIds[key] = variant.id;
-      console.log(`  - Found variant: ${color} ${size} (ID: ${variant.id})`);
+      if (allowedColors.includes(color)) {
+        const key = `${color}-${size}`;
+        variantIds[key] = variant.id;
+        console.log(`✅ Including variant: ${color} ${size} (ID: ${variant.id})`);
+      }
     }
     
     console.log(`✅ Found ${Object.keys(variantIds).length} variants`);
     return variantIds;
   } catch (error) {
     console.error(`❌ Error getting variant IDs:`, error.message);
-    console.log(`⚠️ Using default variant IDs`);
+    console.log(`⚠️ Warning: Unable to fetch variant IDs for product ID ${GILDAN_18000_PRODUCT_ID}`);
+    console.log(`⚠️ This may be because the product ID is incorrect or the API is unavailable.`);
     
-    // Return default variant IDs as fallback
-    return {
-      'white-S': 4781,
-      'white-M': 4782,
-      'white-L': 4783,
-      'white-XL': 4784,
-      'white-2XL': 4785,
-      'black-S': 4786,
-      'black-M': 4787,
-      'black-L': 4788,
-      'black-XL': 4789,
-      'black-2XL': 4790,
-    };
+    // Return an empty object to prevent errors, but let the main script handle what to do
+    return {};
   }
 }
 
@@ -798,6 +801,12 @@ async function main(options = {}) {
     // Get variant IDs if not in dry run mode
     if (!isDryRun) {
       VARIANT_IDS = await getVariantIds();
+      
+      // Check if variant IDs were successfully retrieved
+      if (Object.keys(VARIANT_IDS).length === 0) {
+        console.warn('⚠️ No valid variant IDs returned — switching to template-only mode.');
+        global.TEMPLATE_ONLY = true;
+      }
     }
     
     // Process each file
