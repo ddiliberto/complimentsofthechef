@@ -29,3 +29,5 @@ export-mockups/
 # Logs
 logs/
 *.log
+google-sheets-key.json
+gildan18000-template.psd
