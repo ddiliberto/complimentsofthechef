@@ -16,24 +16,48 @@ const FormData = require('form-data');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
-const { Dropbox } = require('dropbox');
 const generateListing = require('./generateListingFromOpenRouter');
+const generateCSVDashboard = require('./generateCSVDashboard');
+const uploadCSVToGoogleSheet = require('./uploadCSVToGoogleSheet');
+const { uploadFileWithFallbackStrategy } = require('./fileUploader');
 
 // Configuration
 const PRINTFUL_API_KEY = process.env.PRINTFUL_API_KEY;
 const PRINTFUL_STORE_ID = process.env.PRINTFUL_STORE_ID;
-const DROPBOX_ACCESS_TOKEN = process.env.DROPBOX_ACCESS_TOKEN;
-const DROPBOX_FOLDER_PATH = process.env.DROPBOX_FOLDER_PATH || '/PrintfulImages';
 const EXPORT_DIR = path.join(__dirname, 'export');
 const EXPORT_MOCKUPS_DIR = path.join(__dirname, 'export-mockups');
+const MANUAL_TEMPLATES_DIR = path.join(__dirname, 'manual-templates');
 const GILDAN_18000_PRODUCT_ID = 146; // Gildan 18000 Heavy Blend Crewneck Sweatshirt
-
-// Initialize Dropbox client
-const dropbox = new Dropbox({ accessToken: DROPBOX_ACCESS_TOKEN });
 
 // Command line arguments
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run') || args.includes('-d');
+const TEMPLATE_ONLY = !args.includes('--attempt-sync'); // Default to template-only mode
+const SYNC_ONLY = args.includes('--sync-only') || args.includes('-s');
+
+// Add help text
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`
+📋 uploadToPrintful.js Help:
+
+This script creates product templates in Printful from PNG files in the export/ directory.
+
+Options:
+  --dry-run, -d         Run in dry-run mode (no actual API calls)
+  --limit=N, -l=N       Process only N files
+  --attempt-sync        Try to sync products (may fail with platform-based stores)
+  --sync-only, -s       Skip template creation and only sync products
+  --help, -h            Show this help text
+
+Examples:
+  node uploadToPrintful.js                   # Create templates for all files
+  node uploadToPrintful.js --limit=1         # Process only one file
+  node uploadToPrintful.js --dry-run         # Test without making API calls
+  node uploadToPrintful.js --attempt-sync    # Try to create templates and sync products
+  `);
+  process.exit(0);
+}
+
 
 // Check for limit argument (--limit=N or -l=N)
 let LIMIT = Infinity;
@@ -86,254 +110,34 @@ function extractWordFromFilePath(filePath) {
 }
 
 /**
- * Upload file to Dropbox
- * @param {string} filePath - Path to local file
- * @returns {Promise<string>} Dropbox file path
+ * Upload file to Printful with retries
+ * Only uploads design files, not mockups
+ * @param {string} filePath - Path to file
+ * @param {boolean} isDryRun - Whether to run in dry-run mode
+ * @returns {Promise<string>} File URL
  */
-async function uploadFileToDropbox(filePath) {
+async function uploadFileToPrintful(filePath, isDryRun = DRY_RUN) {
   try {
     const fileName = path.basename(filePath);
     
-    // Log the access token (first 10 chars only for security)
-    const tokenPreview = DROPBOX_ACCESS_TOKEN.substring(0, 10) + '...';
-    console.log(`🔑 Using Dropbox access token: ${tokenPreview}`);
-    
-    // Make sure the folder path is properly formatted
-    // Remove trailing slash if present
-    const folderPath = DROPBOX_FOLDER_PATH.endsWith('/') ?
-      DROPBOX_FOLDER_PATH.slice(0, -1) : DROPBOX_FOLDER_PATH;
-    
-    let dropboxFilePath = `/${fileName}`; // Start with root path as default
-    
-    console.log(`⏳ Attempting to upload ${fileName} to Dropbox...`);
-    
-    // First try to authenticate with Dropbox
-    console.log(`⏳ Testing authentication with Dropbox...`);
-    try {
-      const accountInfo = await dropbox.usersGetCurrentAccount();
-      console.log(`✅ Authentication successful, connected as: ${accountInfo?.email || 'unknown user'}`);
-      
-      // Now try the actual folder path
-      try {
-        console.log(`⏳ Checking if folder exists: ${folderPath}`);
-        await dropbox.filesGetMetadata({ path: folderPath });
-        console.log(`✅ Folder exists: ${folderPath}`);
-        dropboxFilePath = `${folderPath}/${fileName}`;
-      } catch (folderError) {
-        console.error(`❌ Error checking folder:`, folderError);
-        if (folderError.status === 409 || folderError.status === 404) {
-          console.log(`⚠️ Folder doesn't exist, will use root folder instead`);
-        } else {
-          console.error(`❌ Unexpected error checking folder, will use root folder:`, folderError);
-        }
-      }
-    } catch (authError) {
-      console.error(`❌ Authentication error:`, authError);
-      console.error(`❌ This suggests an issue with the access token. Please check it's valid and has the correct permissions.`);
-      throw new Error(`Dropbox authentication failed: ${authError.message}`);
+    // In dry run mode, return a mock URL
+    if (isDryRun) {
+      console.log(`🔍 DRY RUN: Would upload ${fileName} to Printful`);
+      return `https://example.com/mockups/${fileName}`;
     }
     
-    // Read the file as a buffer
-    const fileBuffer = fs.readFileSync(filePath);
+    // Use our new upload strategy with fallback
+    console.log(`⏳ Uploading ${fileName} to Printful using improved upload strategy...`);
     
-    console.log(`⏳ File size: ${(fileBuffer.length / 1024).toFixed(2)} KB`);
+    // Upload file using Cloudinary
+    const fileUrl = await uploadFileWithFallbackStrategy(filePath);
     
-    // Upload the file to Dropbox with detailed error handling
-    console.log(`⏳ Uploading to path: ${dropboxFilePath}`);
-    try {
-      const response = await dropbox.filesUpload({
-        path: dropboxFilePath,
-        contents: fileBuffer,
-        mode: { '.tag': 'overwrite' }
-      });
-      
-      console.log(`✅ File uploaded to Dropbox: ${response.path_display || dropboxFilePath}`);
-      return response.path_display || dropboxFilePath;
-    } catch (uploadError) {
-      console.error(`❌ Error during upload:`, uploadError);
-      
-      if (uploadError.error && uploadError.error.error_summary) {
-        console.error(`❌ Error summary: ${uploadError.error.error_summary}`);
-      }
-      
-      // If we're not already trying the root path, try it as fallback
-      if (dropboxFilePath !== `/${fileName}`) {
-        console.log(`⚠️ Trying to upload to root folder as fallback`);
-        try {
-          const rootPath = `/${fileName}`;
-          const rootResponse = await dropbox.filesUpload({
-            path: rootPath,
-            contents: fileBuffer,
-            mode: { '.tag': 'overwrite' }
-          });
-          
-          console.log(`✅ File uploaded to Dropbox root: ${rootResponse.path_display || rootPath}`);
-          return rootResponse.path_display || rootPath;
-        } catch (rootUploadError) {
-          console.error(`❌ Root upload also failed:`, rootUploadError);
-          throw rootUploadError;
-        }
-      } else {
-        throw uploadError;
-      }
-    }
+    console.log(`✅ File successfully uploaded to Printful: ${fileName}`);
+    return fileUrl;
   } catch (error) {
-    console.error(`❌ Error uploading file to Dropbox:`, error);
-    console.error(`❌ Error details:`, JSON.stringify(error, null, 2));
+    console.error(`❌ Error uploading file to Printful:`, error.message);
     throw error;
   }
-}
-
-/**
- * Create a shared link for a Dropbox file
- * @param {string} dropboxFilePath - Path to file in Dropbox
- * @returns {Promise<string>} Shared link URL
- */
-async function createSharedLink(dropboxFilePath) {
-  console.log(`⏳ Creating shared link for ${dropboxFilePath}...`);
-
-  try {
-    const response = await dropbox.sharingCreateSharedLinkWithSettings({
-      path: dropboxFilePath,
-      settings: {
-        requested_visibility: { '.tag': 'public' }
-      }
-    });
-
-    const url = response?.result?.url || response?.url;
-    if (!url) throw new Error('No URL returned from Dropbox link creation');
-
-    const directLink = url
-      .replace('www.dropbox.com', 'dl.dropboxusercontent.com')
-      .replace('?dl=0', '');
-
-    console.log(`✅ Shared link created: ${directLink}`);
-    return directLink;
-
-  } catch (error) {
-    const isConflict = error?.error?.error_summary?.includes('shared_link_already_exists');
-
-    if (isConflict) {
-      console.warn(`⚠️ Shared link already exists — switching to force refresh...`);
-
-      // HACK: Delete and re-create the link
-      try {
-        // List existing links for this file
-        const { links } = await dropbox.sharingListSharedLinks({
-          path: dropboxFilePath,
-          direct_only: true
-        });
-
-        if (links.length > 0) {
-          const existingId = links[0].id;
-          await dropbox.sharingRevokeSharedLink({ url: links[0].url });
-          console.log(`🔁 Revoked existing link: ${existingId}`);
-        }
-
-        // Try again
-        const retryResponse = await dropbox.sharingCreateSharedLinkWithSettings({
-          path: dropboxFilePath,
-          settings: {
-            requested_visibility: { '.tag': 'public' }
-          }
-        });
-
-        const retryUrl = retryResponse?.result?.url || retryResponse?.url;
-        if (!retryUrl) throw new Error('No URL returned on retry');
-
-        const directLink = retryUrl
-          .replace('www.dropbox.com', 'dl.dropboxusercontent.com')
-          .replace('?dl=0', '');
-
-        console.log(`✅ New shared link created: ${directLink}`);
-        return directLink;
-
-      } catch (fallbackError) {
-        console.error(`❌ Fallback link creation failed:`, fallbackError.message);
-        throw fallbackError;
-      }
-    }
-
-    console.error(`❌ Dropbox error: ${error.message}`);
-    throw error;
-  }
-}
-
-/**
- * Upload file to Printful with retries
- * @param {string} filePath - Path to file
- * @param {number} maxRetries - Maximum number of retries
- * @param {number} retryDelay - Delay between retries in ms
- * @returns {Promise<string>} File URL
- */
-async function uploadFileToPrintful(filePath, isDryRun = DRY_RUN, maxRetries = 3, retryDelay = 2000) {
-  let lastError;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      console.log(`⏳ Uploading file to Printful (attempt ${attempt}/${maxRetries})...`);
-      
-      // Get file stats for size information
-      const stats = fs.statSync(filePath);
-      console.log(`📊 File size: ${(stats.size / 1024).toFixed(2)} KB`);
-      
-      const fileName = path.basename(filePath);
-      
-      // In dry run mode, we would upload the file to Dropbox
-      // and then provide the URL to Printful
-      if (isDryRun) {
-        console.log(`🔍 DRY RUN: Would upload ${fileName} to Dropbox and then add to Printful`);
-        return `https://example.com/mockups/${fileName}`;
-      }
-      
-      // Step 1: Upload the file to Dropbox
-      const dropboxFilePath = await uploadFileToDropbox(filePath);
-      
-      // Step 2: Create a shared link for the file
-      const sharedLink = await createSharedLink(dropboxFilePath);
-      
-      // Step 3: Add the file to Printful using the shared link
-      console.log(`⏳ Adding ${fileName} to Printful file library using Dropbox link...`);
-      
-      try {
-        const response = await printfulApi.post('/files', {
-          url: sharedLink,
-          type: 'default',
-          filename: fileName,
-          visible: true
-        });
-        
-        if (response.data && response.data.result && response.data.result.url) {
-          console.log(`✅ File added to Printful library: ${fileName}`);
-          return response.data.result.url;
-        } else {
-          console.error('❌ Invalid response structure:', JSON.stringify(response.data));
-          throw new Error('Invalid response from Printful file upload');
-        }
-      } catch (apiError) {
-        if (apiError.response) {
-          console.error('❌ Server responded with error:', apiError.response.status);
-          console.error('❌ Error data:', JSON.stringify(apiError.response.data));
-          throw new Error(`Server error: ${apiError.response.status} - ${JSON.stringify(apiError.response.data)}`);
-        } else {
-          throw apiError;
-        }
-      }
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ Error uploading file ${filePath} (attempt ${attempt}/${maxRetries}):`, error.message);
-      
-      if (attempt < maxRetries) {
-        console.log(`⏳ Retrying in ${retryDelay / 1000} seconds...`);
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        // Increase delay for next retry
-        retryDelay *= 1.5;
-      }
-    }
-  }
-  
-  // If we've exhausted all retries, throw the last error
-  throw lastError;
 }
 
 /**
@@ -465,26 +269,80 @@ async function waitForMockupGeneration(taskKey, maxAttempts = 10, initialDelay =
  * @param {Object} mockupResult - Mockup generation result
  * @returns {Promise<Object>} Created product
  */
+/**
+ * Create a product template on Printful for a design
+ * @param {string} designName - The design name (e.g., 'TACOS')
+ * @param {string} fileUrl - Direct URL to the uploaded design file
+ * @param {Array<number>} variantIds - Array of Printful variant IDs
+ * @returns {Promise<Object>} - Template information
+ */
+async function createProductTemplate(designName, fileUrl, variantIds) {
+  console.log(`\n❌ Printful does not support template creation via API.`);
+  console.log(`👉 Create your template manually here: https://www.printful.com/dashboard/product-templates/create`);
+  console.log(`🖼️ Use the uploaded file URL: ${fileUrl}`);
+  console.log(`📦 Suggested variants (first 5): ${variantIds.slice(0, 5).join(', ')}...`);
+  
+  console.log(`\n📐 Suggested positioning:`);
+  console.log(`   - Width: 1800px`);
+  console.log(`   - Height: 900px`);
+  console.log(`   - Top: 0`);
+  console.log(`   - Left: 0`);
+  
+  console.log(`📋 Metadata will be saved for easy copy/paste\n`);
+
+  return {
+    manualTemplate: true,
+    designName,
+    fileUrl,
+    metadataPath: `manual-templates/${designName}.json`
+  };
+}
+
+/**
+ * Create product with Etsy sync
+ * @param {string} word - Product word
+ * @param {Object} listingContent - Listing content from OpenRouter
+ * @param {Object} manualMockup - Mockup data
+ * @returns {Promise<Object>} Created product
+ */
 async function createProductWithEtsySync(word, listingContent, manualMockup) {
   try {
     // Extract mockup URL - simplified for direct access
     const mockupUrl = manualMockup.mockups[0].mockup_url;
-    const mockupFiles = manualMockup.mockups[0].mockup_files || [];
+    const mockupFiles = manualMockup.mockups[0].local_mockup_files || manualMockup.mockups[0].mockup_files || [];
     
     console.log(`⏳ Creating product with ${mockupFiles.length} custom mockups`);
     
-    // Prepare sync variants
-    const syncVariants = Object.entries(VARIANT_IDS).map(([colorSize, variantId]) => {
-      const [color, size] = colorSize.split('-');
-      return {
+    // Prepare sync variants with files for each variant
+    console.log(`⚠️ Limiting from ${Object.entries(VARIANT_IDS).length} to 100 variants due to Printful API limits`);
+    const syncVariants = Object.entries(VARIANT_IDS)
+      .slice(0, 100) // LIMIT TO 100 VARIANTS MAX
+      .map(([colorSize, variantId]) => ({
         variant_id: variantId,
         retail_price: '29.99', // Set your retail price
-        is_enabled: true
-      };
-    });
+        is_enabled: true,
+        files: [
+          {
+            url: mockupUrl,
+            type: 'default',
+            placement: 'front'
+          }
+        ]
+      }));
     
-    // Create product with best-seller format
-    const response = await printfulApi.post('/store/products', {
+    // Check if we're using a Manual/API store or an Etsy store
+    let storeType = 'manual';
+    let storeInfo = null;
+    try {
+      storeInfo = await getStoreInfo();
+      storeType = storeInfo.type && storeInfo.type.toLowerCase();
+      console.log(`🏪 Detected store type: ${storeType}`);
+    } catch (error) {
+      console.warn(`⚠️ Could not determine store type, assuming Manual/API store: ${error.message}`);
+    }
+    
+    // Prepare the request payload based on store type
+    const payload = {
       sync_product: {
         name: `${word} Sweatshirt - Cute Oversized Unisex Crewneck`,
         thumbnail: mockupUrl, // Use the direct mockup URL
@@ -494,7 +352,12 @@ async function createProductWithEtsySync(word, listingContent, manualMockup) {
       retail_costs: {
         shipping: '5.00' // Set your shipping cost
       },
-      etsy: {
+    };
+    
+    // Only include the etsy block if this is an Etsy store
+    if (storeType === 'etsy') {
+      console.log(`✅ Adding Etsy-specific data to request payload`);
+      payload.etsy = {
         title: listingContent.title,
         description: listingContent.description,
         tags: listingContent.tags,
@@ -506,8 +369,42 @@ async function createProductWithEtsySync(word, listingContent, manualMockup) {
         non_taxable: false,
         is_customizable: false,
         image_ids: [] // Will be populated by Printful
+      };
+    } else {
+      console.log(`✅ Using Manual/API store format (no Etsy data included)`);
+    }
+    
+    // Log the payload for debugging
+    console.log(`📦 Request payload structure:`);
+    console.log(JSON.stringify({
+      sync_product: payload.sync_product,
+      sync_variants: `[${syncVariants.length} variants with files]`,
+      retail_costs: payload.retail_costs,
+      etsy: payload.etsy ? 'Included' : 'Not included'
+    }, null, 2));
+    
+    // Create product with appropriate format
+    try {
+      const response = await printfulApi.post('/store/products', payload);
+      return response.data.result;
+    } catch (apiError) {
+      console.error(`❌ API Error Details:`);
+      if (apiError.response) {
+        console.error(`Status: ${apiError.response.status}`);
+        console.error(`Response data: ${JSON.stringify(apiError.response.data, null, 2)}`);
+        
+        // Check for specific error messages
+        if (apiError.response.data && apiError.response.data.error) {
+          console.error(`Error code: ${apiError.response.data.error.code || 'N/A'}`);
+          console.error(`Error message: ${apiError.response.data.error.message || 'N/A'}`);
+        }
+      } else if (apiError.request) {
+        console.error(`No response received: ${apiError.request}`);
+      } else {
+        console.error(`Error setting up request: ${apiError.message}`);
       }
-    });
+      throw apiError;
+    }
     
     console.log(`✅ Product created: ${listingContent.title}`);
     
@@ -571,7 +468,6 @@ async function createProductWithEtsySync(word, listingContent, manualMockup) {
       }
     }
     
-    return response.data.result;
   } catch (error) {
     console.error(`❌ Error creating product:`, error.message);
     throw error;
@@ -610,13 +506,13 @@ async function processFile(filePath, isDryRun = DRY_RUN) {
       return { dryRun: true, word, listingContent };
     }
     
-    // Step 2: Upload file to Printful
+    // Step 2: Upload file to Printful using our improved strategy
     console.log(`⏳ Uploading file to Printful...`);
     let fileUrl;
     
     let manualMockup;
     try {
-      // First, upload the original design file to Printful
+      // Upload the original design file to Printful using our new strategy
       fileUrl = await uploadFileToPrintful(filePath, isDryRun);
       
       // Check if we need to generate mockups with Photoshop
@@ -660,13 +556,15 @@ async function processFile(filePath, isDryRun = DRY_RUN) {
       }
       
       // Create a mockup data structure with the available mockups
+      // Note: We're no longer uploading mockups to Dropbox, just referencing them locally
       manualMockup = {
-        mockups: mockupFiles.length > 0
-          ? [{ mockup_url: fileUrl, mockup_files: mockupFiles }]
-          : [{ mockup_url: fileUrl }]
+        mockups: [{
+          mockup_url: fileUrl,
+          local_mockup_files: mockupFiles.length > 0 ? mockupFiles : []
+        }]
       };
       
-      console.log(`📊 Found ${mockupFiles.length} mockup files for ${word}`);
+      console.log(`📊 Found ${mockupFiles.length} local mockup files for ${word}`);
     } catch (uploadError) {
       console.error(`❌ Error uploading to Printful: ${uploadError.message}`);
       
@@ -681,12 +579,82 @@ async function processFile(filePath, isDryRun = DRY_RUN) {
       };
     }
     
-    // Step 5: Create product with Etsy sync
-    console.log(`⏳ Creating product with Etsy sync...`);
-    const product = await createProductWithEtsySync(word, listingContent, manualMockup);
+    // Step 4: Create product template
+    console.log(`⏳ Creating product template...`);
+    let templateId = null;
     
+    // Validate conflicting options
+    if (TEMPLATE_ONLY && SYNC_ONLY) {
+      console.error('❌ Error: Cannot use both --template-only and --sync-only options together.');
+      return null;
+    }
+    
+    // Create product template if not in sync-only mode
+    if (!SYNC_ONLY) {
+      try {
+        const variantIds = Object.values(VARIANT_IDS);
+        const templateInfo = await createProductTemplate(word, fileUrl, variantIds);
+        
+        // Save metadata for manual template creation
+        const listingOutput = {
+          word,
+          fileUrl,
+          title: listingContent.title,
+          description: listingContent.description,
+          tags: listingContent.tags,
+          dropboxLink: manualMockup.mockups[0].mockup_url,
+          localMockups: manualMockup.mockups[0].local_mockup_files || [],
+          createdAt: new Date().toISOString()
+        };
+        
+        fs.writeFileSync(
+          path.join(MANUAL_TEMPLATES_DIR, `${word}.json`),
+          JSON.stringify(listingOutput, null, 2)
+        );
+        
+        console.log(`✅ Saved metadata for ${word} to manual-templates/${word}.json`);
+        
+        // If template-only mode, stop here
+        if (TEMPLATE_ONLY) {
+          console.log(`✅ Template-only mode: Skipping product sync for ${word}`);
+          return { templateInfo, word };
+        }
+      } catch (templateError) {
+        console.error(`❌ Error creating product template: ${templateError.message}`);
+        if (TEMPLATE_ONLY) {
+          throw templateError; // In template-only mode, fail if template creation fails
+        }
+        console.log(`⚠️ Continuing with product sync without template...`);
+      }
+    }
+    
+    // Step 5: Create product with Etsy sync if not in template-only mode
+    if (!TEMPLATE_ONLY) {
+      try {
+        console.log(`\n⚠️ Attempting to sync product (may fail with platform-based stores)...`);
+        const product = await createProductWithEtsySync(word, listingContent, manualMockup);
+        console.log(`✅ Successfully processed ${word}`);
+        return { product, word };
+      } catch (syncError) {
+        if (syncError.response && syncError.response.status === 400 &&
+            syncError.response.data && syncError.response.data.error &&
+            syncError.response.data.error.message &&
+            syncError.response.data.error.message.includes('Manual Order / API platform')) {
+          console.log(`\n⚠️ Store type limitation detected: Your Printful store is platform-based.`);
+          console.log(`⚠️ Product syncing is only available for Manual Order / API platform stores.`);
+          console.log(`⚠️ Please use the template information saved to manual-templates/${word}.json for manual creation.`);
+        } else {
+          console.error(`❌ Error syncing product: ${syncError.message}`);
+        }
+        
+        // Return success with template info only
+        return { templateOnly: true, word };
+      }
+    }
+    
+    // If we reach here, something unexpected happened
     console.log(`✅ Successfully processed ${word}`);
-    return product;
+    return { word };
   } catch (error) {
     console.error(`❌ Error processing ${word}:`, error.message);
     // Continue with next file
@@ -755,7 +723,7 @@ async function getStoreInfo() {
     
     if (response.data && response.data.result && response.data.result.length > 0) {
       const store = response.data.result[0]; // Use the first store
-      console.log(`✅ Found store: ${store.name} (ID: ${store.id})`);
+      console.log(`✅ Found store: ${store.name} (ID: ${store.id}, Type: ${store.type || 'unknown'})`);
       return store;
     } else {
       throw new Error('No stores found in Printful account');
@@ -787,16 +755,18 @@ async function main(options = {}) {
       console.log(`📁 Created export-mockups directory`);
     }
     
+    // Create manual-templates directory if it doesn't exist
+    if (!fs.existsSync(MANUAL_TEMPLATES_DIR)) {
+      fs.mkdirSync(MANUAL_TEMPLATES_DIR, { recursive: true });
+      console.log(`📁 Created manual-templates directory`);
+    }
+    
     if (isDryRun) {
-      console.log('🔍 DRY RUN MODE: No actual API calls will be made to Printful or Dropbox');
+      console.log('🔍 DRY RUN MODE: No actual API calls will be made to Printful');
     } else {
       // Check if API keys are set
       if (!PRINTFUL_API_KEY) {
         throw new Error('PRINTFUL_API_KEY is not set in .env file');
-      }
-      
-      if (!DROPBOX_ACCESS_TOKEN) {
-        throw new Error('DROPBOX_ACCESS_TOKEN is not set in .env file');
       }
       
       // Check if store ID is set, if not, try to get it from the API
@@ -814,33 +784,6 @@ async function main(options = {}) {
         }
       }
       
-      // Verify Dropbox connection
-      try {
-        console.log('⏳ Verifying Dropbox connection...');
-        const accountInfo = await dropbox.usersGetCurrentAccount();
-        console.log('✅ Dropbox account info:', JSON.stringify(accountInfo, null, 2));
-        
-        // Check if we have the expected account info structure
-        if (accountInfo) {
-          const email = accountInfo?.email || 'unknown email';
-          const displayName = accountInfo.name ?
-            (accountInfo.name.display_name || accountInfo.name.familiar_name || accountInfo.name.given_name || 'Unknown') :
-            'Unknown';
-          console.log(`✅ Connected to Dropbox as: ${displayName} (${email})`);
-        } else {
-          console.log(`✅ Connected to Dropbox (account details not available)`);
-        }
-      } catch (error) {
-        console.error('❌ Error connecting to Dropbox:', error.message);
-        console.error('❌ Error details:', error);
-        
-        if (isDryRun) {
-          console.log('⚠️ Continuing in dry run mode despite Dropbox connection issues');
-        } else {
-          throw new Error('Failed to connect to Dropbox. Please check your access token.');
-        }
-      }
-    }
     
     // Get all PNG files from export directory
     let files = await getPngFilesFromExport();
@@ -868,11 +811,48 @@ async function main(options = {}) {
     }
     
     // Print summary
-    console.log('\n📊 Upload Summary:');
-    console.log(`✅ Successfully processed: ${results.length}/${files.length}`);
-    console.log(`❌ Failed: ${files.length - results.length}/${files.length}`);
+    console.log('\n📊 Template Creation Summary:');
+    
+    // Define templatesCreated outside the conditional blocks so it's available everywhere
+    let templatesCreated = 0;
+    
+    if (isDryRun) {
+      console.log(`🔍 DRY RUN: Would have created templates for ${results.length} files`);
+    } else {
+      templatesCreated = results.filter(r => r.templateInfo || r.templateOnly).length;
+      console.log(`✅ Successfully created templates: ${templatesCreated}/${files.length}`);
+      console.log(`❌ Failed: ${files.length - templatesCreated}/${files.length}`);
+    }
+    
+    if (!TEMPLATE_ONLY) {
+      console.log(`\n📊 Product Sync Summary:`);
+      
+      if (isDryRun) {
+        console.log(`🔍 DRY RUN: Would have attempted to sync ${results.length} products`);
+      } else {
+        const syncedCount = results.filter(r => r.product).length;
+        console.log(`✅ Successfully synced products: ${syncedCount}/${files.length}`);
+        
+        if (syncedCount === 0) {
+          console.log(`\n⚠️ No products were synced. This is normal for platform-based stores.`);
+          console.log(`⚠️ To sync products, use the templates created above in the Printful dashboard.`);
+          console.log(`⚠️ You can also create a Manual Order / API platform store in Printful for testing.`);
+        }
+      }
+    }
+    
+    if (templatesCreated > 0) {
+      console.log(`\n🔗 Access your templates at: https://www.printful.com/dashboard/product-templates`);
+      console.log(`📋 Metadata saved to manual-templates/ directory for easy copy/paste`);
+    }
+    
+    // Generate and upload dashboard to Google Sheets if not in dry run mode
+    if (!isDryRun) {
+      await generateAndUploadDashboard();
+    }
     
     console.log('\n✨ Done!');
+  } // Close the else block that started at line 731
   } catch (error) {
     console.error('❌ Error:', error.message);
     process.exit(1);
@@ -887,9 +867,44 @@ if (require.main === module) {
   });
 }
 
+/**
+ * Generate and upload dashboard to Google Sheets
+ * @returns {Promise<void>}
+ */
+async function generateAndUploadDashboard() {
+  try {
+    console.log('\n📊 Generating and uploading dashboard...');
+    
+    // Generate CSV dashboard
+    const csvPath = await generateCSVDashboard({
+      templatesDir: MANUAL_TEMPLATES_DIR,
+      outputPath: path.join(__dirname, 'listing-dashboard.csv'),
+    });
+    
+    if (!csvPath) {
+      console.log('⚠️ No dashboard generated, skipping upload');
+      return;
+    }
+    
+    // Get spreadsheet ID from environment variable or use the hardcoded one
+    const spreadsheetId = process.env.GOOGLE_SHEETS_DASHBOARD_ID || '1q5gbFZTX6Upk7UgnJlMey3xfzr3QJiNTfYabJDEu4AQ';
+    
+    // Upload to Google Sheets
+    await uploadCSVToGoogleSheet({
+      csvPath,
+      spreadsheetId,
+      credentialsPath: path.join(__dirname, 'google-sheets-key.json'),
+    });
+    
+    console.log('✅ Dashboard successfully uploaded to Google Sheets');
+  } catch (err) {
+    console.error('❌ Failed to generate and upload dashboard:', err.message);
+  }
+}
+
 module.exports = {
   processFile,
   main,
-  uploadFileToDropbox,
-  createSharedLink
+  uploadFileToPrintful,
+  generateAndUploadDashboard
 };

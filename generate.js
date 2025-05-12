@@ -42,6 +42,7 @@ Options:
   --skip-upload        Skip the upload to Printful step
   --dry-run, -d        Run in dry-run mode (no actual API calls to Printful or Dropbox)
   --limit=N, -l=N      Limit the number of files to process
+  --direct-upload      Use direct upload to Printful (no Dropbox)
   -help, --help, -h    Show this help menu
 
 Examples:
@@ -50,6 +51,7 @@ Examples:
   node generate.js --skip-upload       # Skip Printful upload
   node generate.js --dry-run           # Run in dry-run mode
   node generate.js --limit=5           # Process only 5 files
+  node generate.js --direct-upload     # Use direct upload to Printful
   node generate.js -help               # Show this help menu
 `);
   process.exit(0);
@@ -368,7 +370,17 @@ async function runPipeline() {
       uploadSuccess = true;
       console.log('✅ Printful upload completed successfully');
     } catch (error) {
-      console.error(`❌ Printful upload error: ${error.message}`);
+      // Check if this is a Dropbox token expiration error
+      if (error.message && error.message.includes('Dropbox token')) {
+        console.error(`❌ Dropbox token error: ${error.message}`);
+        console.log('\n🔑 To refresh your Dropbox token:');
+        console.log('1. Go to https://www.dropbox.com/developers/apps');
+        console.log('2. Select your app');
+        console.log('3. Generate a new access token');
+        console.log('4. Update your .env file with the new token');
+      } else {
+        console.error(`❌ Printful upload error: ${error.message}`);
+      }
       console.log('⚠️ Pipeline will continue but upload step failed');
     }
   }

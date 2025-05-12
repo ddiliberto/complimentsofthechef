@@ -247,7 +247,7 @@ main().catch(error => {
 ### 5. Implement Product Creation
 - Create a function to create a Sync Product with Etsy sync
 - Add variants for different sizes and colors
-- Apply the GPT-generated content to the Etsy listing
+- Apply the GPT-generated content to the listing
 
 ### 6. Implement Main Process Flow
 - Process each design sequentially

@@ -1,0 +1,8 @@
+{
+  "id": "dry-run-id",
+  "title": "[DRY RUN] TEST Sweatshirt",
+  "url": "https://example.com/dry-run-product",
+  "imageUrl": "https://example.com/dry-run-mockup.png",
+  "createdAt": "2025-05-12T01:08:12.993Z",
+  "isDryRun": true
+}
